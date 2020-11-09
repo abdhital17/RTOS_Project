@@ -7,6 +7,7 @@
 	.def getPSPaddress
 	.def getMSPaddress
 	.def setASPbit
+	.def getSVCNumber
 
 
 .thumb
@@ -43,6 +44,14 @@ setASPbit:
 			ORR 	R4, R4, #0x2
 			MSR		CONTROL, R4
 			BX 		LR
+
+getSVCNumber:
+			MRS		R0, PSP
+			LDR		R0, [R0, #24]
+			LDR		R0, [R0, #-2]
+			;SUB		R0, R0, #4;
+			AND		R0, R0, #0xFF
+			BX		LR
 
 
 .endm

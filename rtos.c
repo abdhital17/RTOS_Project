@@ -81,6 +81,10 @@
 #define PUSH_BUTTON_MASK_5 128
 
 
+//SVC Number MACROS
+#define YIELD 10;
+#define SLEEP 20;
+
 //allocation of 28KiB of heap starting from address 0x20001000 in SRAM
 #pragma DATA_SECTION(stack, ".heap")
 static uint32_t stack [7168];
@@ -91,6 +95,8 @@ uint32_t heap_pointer = 0x20001000;
 extern uint32_t getPSPaddress();
 extern void setASPbit();
 extern void setPSPaddress(uint32_t address);
+extern uint8_t getSVCNumber();
+
 
 
 
@@ -345,7 +351,9 @@ void yield()
 // return to new function (separate unrun or ready processing)
 void sleep(uint32_t tick)
 {
+    __asm(" SVC #20");
 }
+
 
 // REQUIRED: modify this function to wait a semaphore with priority inheritance
 // return if avail (separate unrun or ready processing), else yield to scheduler using pendsv
@@ -362,6 +370,17 @@ void post(int8_t semaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
+    uint8_t count = 0;
+    for (count; count < MAX_TASKS; count++)
+    {
+        if (tcb[count].state == STATE_DELAYED)
+        {
+            (tcb[count].ticks)--;
+
+            if (tcb[count].ticks == 0)
+                tcb[count].state = STATE_READY;
+        }
+    }
 }
 
 //function to push registers to PSP in Isr when ASP = 1
@@ -450,7 +469,35 @@ void pendSvIsr()
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
-    NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
+    uint32_t r0, r1, r2, r3, r12;
+    uint8_t N;
+    uint32_t* psp = getPSPaddress();
+    r0 = *(psp);
+    r1 = *(psp + 1);
+    r2 = *(psp + 2);
+    r3 = *(psp + 3);
+    r12 = *(psp + 4);
+
+    N = getSVCNumber();
+
+   switch(N)
+   {
+       case 10:
+               NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
+               break;
+
+       case 20:
+               tcb[taskCurrent].ticks = r0;
+               tcb[taskCurrent].state = STATE_DELAYED;
+               NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
+
+               NVIC_ST_RELOAD_R |= 39999;
+               NVIC_ST_CTRL_R |= 0x7;
+
+               break;
+
+   }
+
 }
 
 // REQUIRED: code this function
@@ -586,8 +633,6 @@ void idle()
         ORANGE_LED = 0;
 
         uint32_t stack_pointer = getSP();
-
-
         //code & discard
         __asm("       MOV   R0, #0");
         __asm("       MOV   R1, #1");
@@ -787,12 +832,12 @@ int main(void)
     resource = createSemaphore(1);
 
     // Add required idle process at lowest priority
-    ok =  createThread(idle, "Idle", 15, 1024);
-    ok &= createThread(idle2, "Idle2", 15, 1024);  //cod & discard
+      ok =  createThread(idle, "Idle", 15, 1024);
+  //  ok &= createThread(idle2, "Idle2", 15, 1024);  //cod & discard
 
 //    // Add other processes
 //    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
-//    ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
+      ok = createThread(flash4Hz, "Flash4Hz", 8, 1024);
 //    ok &= createThread(oneshot, "OneShot", 4, 1024);
 //    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
 //    ok &= createThread(debounce, "Debounce", 12, 1024);

@@ -2,7 +2,7 @@
 // J Losh
 
 // Student Name:
-// TO DO: Add your name on this line.  Do not include your ID number in the file.
+// Abhishek Dhital
 
 // Add xx_ prefix to all files in your project
 // xx_rtos.c
@@ -82,8 +82,10 @@
 
 
 //SVC Number MACROS
-#define YIELD 10;
-#define SLEEP 20;
+#define YIELD 10
+#define SLEEP 20
+#define WAIT  30
+#define POST  40
 
 //allocation of 28KiB of heap starting from address 0x20001000 in SRAM
 #pragma DATA_SECTION(stack, ".heap")
@@ -359,11 +361,13 @@ void sleep(uint32_t tick)
 // return if avail (separate unrun or ready processing), else yield to scheduler using pendsv
 void wait(int8_t semaphore)
 {
+    __asm(" SVC #30");
 }
 
 // REQUIRED: modify this function to signal a semaphore is available using pendsv
 void post(int8_t semaphore)
 {
+    __asm(" SVC #40");
 }
 
 // REQUIRED: modify this function to add support for the system timer
@@ -371,7 +375,7 @@ void post(int8_t semaphore)
 void systickIsr()
 {
     uint8_t count = 0;
-    for (count; count < MAX_TASKS; count++)
+    for (count = 0; count < MAX_TASKS; count++)
     {
         if (tcb[count].state == STATE_DELAYED)
         {
@@ -383,7 +387,7 @@ void systickIsr()
     }
 }
 
-//function to push registers to PSP in Isr when ASP = 1
+//function to push registers R4-11 to PSP in Isr when ASP = 1
 void PushRegstoPSP()
 {
     __asm("         MRS R0, PSP");
@@ -398,7 +402,7 @@ void PushRegstoPSP()
 }
 
 
-//function to pop registers from PSP in ISR when ASP = 1
+//function to pop registers R4-11 from PSP in ISR when ASP = 1
 void PopRegsFromPSP()
 {
     __asm("          MRS R0, PSP");
@@ -415,7 +419,7 @@ void PopRegsFromPSP()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    BLUE_LED = 1;
+    BLUE_LED = 1;           //code & discard
     PushRegstoPSP();
     tcb[taskCurrent].sp = getPSPaddress();
 
@@ -471,6 +475,7 @@ void svCallIsr()
 {
     uint32_t r0, r1, r2, r3, r12;
     uint8_t N;
+    //getting the PSP stack of the process
     uint32_t* psp = getPSPaddress();
     r0 = *(psp);
     r1 = *(psp + 1);
@@ -482,10 +487,12 @@ void svCallIsr()
 
    switch(N)
    {
+       //yield
        case 10:
                NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
                break;
 
+       //sleep
        case 20:
                tcb[taskCurrent].ticks = r0;
                tcb[taskCurrent].state = STATE_DELAYED;
@@ -495,6 +502,43 @@ void svCallIsr()
                NVIC_ST_CTRL_R |= 0x7;
 
                break;
+
+       //wait
+       case 30:
+               if (semaphores[r0].count > 0)
+                   (semaphores[r0].count--);
+
+               else
+               {
+                   tcb[taskCurrent].state = STATE_BLOCKED;
+                   tcb[taskCurrent].semaphore = &semaphores[r0];
+                   semaphores[r0].processQueue[semaphores[r0].queueSize] = taskCurrent;
+                   (semaphores[r0].queueSize)++;
+                   NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
+               }
+               break;
+
+       //post
+       case 40:
+               (semaphores[r0].count)++;
+               if(semaphores[r0].queueSize > 0)
+               {
+                   tcb[semaphores[r0].processQueue[0]].state = STATE_READY;
+                   (semaphores[r0].count--);
+
+
+                   uint8_t pQ = 0;
+                   while(pQ < (semaphores[r0].queueSize - 1))
+                   {
+                       semaphores[r0].processQueue[pQ] = semaphores[r0].processQueue[pQ + 1];
+                       pQ++;
+                   }
+
+                   (semaphores[r0].queueSize--);
+
+               }
+               break;
+
 
    }
 
@@ -837,8 +881,8 @@ int main(void)
 
 //    // Add other processes
 //    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
-      ok = createThread(flash4Hz, "Flash4Hz", 8, 1024);
-//    ok &= createThread(oneshot, "OneShot", 4, 1024);
+//      ok & = createThread(flash4Hz, "Flash4Hz", 8, 1024);
+      ok &= createThread(oneshot, "OneShot", 4, 1024);
 //    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
 //    ok &= createThread(debounce, "Debounce", 12, 1024);
 //    ok &= createThread(important, "Important", 0, 1024);

@@ -81,7 +81,7 @@
 #define PUSH_BUTTON_MASK_5 128
 
 
-//SVC Number MACROS
+//Service Call Number MACROS
 #define YIELD 10
 #define SLEEP 20
 #define WAIT  30
@@ -131,10 +131,14 @@ uint8_t keyPressed, keyReleased, flashReq, resource;
 #define STATE_READY      2 // has run, can resume at any time
 #define STATE_DELAYED    3 // has run, but now awaiting timer
 #define STATE_BLOCKED    4 // has run, but now blocked by semaphore
+#define STATE_KILLED     5 //has been killed by using the shell command -> "kill PID"
 
 #define MAX_TASKS 12       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
+
+bool priorityScheduling = false; //true if priority scheduling mode
+                                 //false if round-robin scheduling mode
 
 // REQUIRED: add store and management for the memory used by the thread stacks
 //           thread stacks must start on 1 kiB boundaries so mpu can work correctly
@@ -151,6 +155,8 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
+
+
 
 //-----------------------------------------------------------------------------
 // RTOS Kernel Functions
@@ -173,17 +179,40 @@ void initRtos()
 // REQUIRED: Implement prioritization to 16 levels
 int rtosScheduler()
 {
-    bool ok;
     static uint8_t task = 0xFF;
-    ok = false;
-    while (!ok)
+    if (!priorityScheduling)        //round robin
     {
-        task++;
-        if (task >= MAX_TASKS)
-            task = 0;
-        ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+        bool ok;
+        ok = false;
+        while (!ok)
+        {
+            task++;
+            if (task >= MAX_TASKS)
+                task = 0;
+            ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+        }
+        return task;
     }
-    return task;
+
+    else        //priority scheduling
+    {
+        uint8_t i = taskCurrent + 1;
+        while (i != taskCurrent)
+        {
+            if (tcb[i].state == STATE_READY || tcb[i].state == STATE_UNRUN)
+            {
+                if (tcb[i].currentPriority < task)
+                {
+                    task = i;
+                }
+            }
+
+            i = (i + 1) % MAX_TASKS;
+        }
+
+        return task;
+    }
+
 }
 
 void PrintIntToHex(uint32_t value)
@@ -248,7 +277,10 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             for (j=0; j<16; j++)
             {
                 if (name[j] == 0)
-                        break;
+                {
+                    tcb[i].name[j] = '\0';
+                    break;
+                }
                 tcb[i].name[j] = name [j];
             }
 
@@ -419,15 +451,14 @@ void PopRegsFromPSP()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    BLUE_LED = 1;           //code & discard
     PushRegstoPSP();
-    tcb[taskCurrent].sp = getPSPaddress();
+    tcb[taskCurrent].spInit = getPSPaddress();
 
     taskCurrent=rtosScheduler();
 
     if(tcb[taskCurrent].state == STATE_READY)
     {
-        setPSPaddress(tcb[taskCurrent].sp);
+        setPSPaddress(tcb[taskCurrent].spInit);
         PopRegsFromPSP();
     }
 
@@ -465,8 +496,6 @@ void pendSvIsr()
         setPSPaddress(psp_add);
      }
 
-    BLUE_LED = 0;
-
 }
 
 // REQUIRED: modify this function to add support for the service call
@@ -476,7 +505,7 @@ void svCallIsr()
     uint32_t r0, r1, r2, r3, r12;
     uint8_t N;
     //getting the PSP stack of the process
-    uint32_t* psp = getPSPaddress();
+    uint32_t* psp = (uint32_t*) getPSPaddress();
     r0 = *(psp);
     r1 = *(psp + 1);
     r2 = *(psp + 2);
@@ -498,7 +527,7 @@ void svCallIsr()
                tcb[taskCurrent].state = STATE_DELAYED;
                NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
 
-               NVIC_ST_RELOAD_R |= 39999;
+               NVIC_ST_RELOAD_R = 39999;
                NVIC_ST_CTRL_R |= 0x7;
 
                break;
@@ -539,6 +568,64 @@ void svCallIsr()
                }
                break;
 
+       //kill PID
+       case 50: ;
+               uint8_t j;
+               j = 0;
+               bool check = false;
+               while (j < MAX_TASKS)
+               {
+                   if (tcb[j].pid == r0)
+                   {
+                       tcb[j].state = STATE_KILLED;
+                       check = true;
+                       break;
+                   }
+                   j++;
+               }
+               if (check)
+               {
+                   PrintIntToHex(r0);
+                   putsUart0(" Killed\n\r");
+               }
+               else
+                   putsUart0("pid not found\n\r");
+
+               break;
+
+       //reboot
+       case 51:
+               NVIC_APINT_R = 0x05FA0004;
+
+       //run task_name
+       case 52: ;
+               char *Process_Name = r0;
+               uint8_t ind = 0;
+               bool notFound = true;
+               while(ind < MAX_TASKS)
+               {
+                   if (stringCompare(Process_Name, tcb[ind].name))
+                   {
+                       notFound = false;
+                       if (tcb[ind].state == STATE_UNRUN || tcb[ind].state == STATE_KILLED)
+                           tcb[ind].state = STATE_READY;
+
+                       else
+                       {
+                           putsUart0(Process_Name);
+                           putsUart0(" already running\n\r");
+                       }
+                       break;
+                   }
+                   ind++;
+               }
+               if (notFound)
+               {
+                   putsUart0(Process_Name);
+                   putsUart0(" not found\n\r");
+               }
+
+               break;
 
    }
 
@@ -692,9 +779,9 @@ void idle()
         __asm("       MOV   R11, #11");
         __asm("       MOV   R12, #12");
 
-        putsUart0("SP: ");
-        PrintIntToHex(stack_pointer);
-        putsUart0("\n\r");
+//        putsUart0("SP: ");
+//        PrintIntToHex(stack_pointer);
+//        putsUart0("\n\r");
 
 
 
@@ -839,12 +926,362 @@ void important()
     }
 }
 
-// REQUIRED: add processing for the shell commands through the UART here
+
+//-----------------------------------------------------------------------------
+// RTOS Shell Variables/Macro/Structures/Functions
+//-----------------------------------------------------------------------------
+#define MAX_CHARS 80
+#define MAX_FIELDS 5
+
+
+
+typedef struct _USER_DATA
+{
+char buffer[MAX_CHARS+1];
+uint8_t fieldCount;
+uint8_t fieldPosition[MAX_FIELDS];
+char fieldType[MAX_FIELDS];
+} USER_DATA;
+
+void getsUart0(USER_DATA* d)
+{
+  uint8_t c=0; //counter variable
+  char ch;
+  while (1)  //loop starts
+  {
+
+    ch=getcUart0();
+    if ((ch==8 || ch==127) && c>0) c--;
+
+    else if (ch==13)
+        {
+         d->buffer[c]=0;
+         return;
+        }
+    else if (ch>=32)
+     {
+        d->buffer[c]=ch;
+        //putcUart0(ch);
+        c++;
+        if (c==MAX_CHARS)
+        {
+            d->buffer[c]='\0';
+            return;
+        }
+     }
+     else continue;
+  }
+}
+
+void parseFields(USER_DATA* d)
+{
+    uint8_t i=0;
+    char prev=0;
+    d->fieldCount=0;
+    while(d->buffer[i]!='\0')
+    {
+        if((d->fieldCount)>=MAX_FIELDS)
+        {
+            break;
+        }
+
+        char temp=d->buffer[i];
+
+        if(((temp>=97 && temp<=122) || (temp>=65&&temp<=90)) && prev!='a' )
+        {
+            prev='a';
+            d->fieldType[(d->fieldCount)]='a';
+            d->fieldPosition[(d->fieldCount)]=i;
+            d->fieldCount+=1;
+        }
+
+        else if ((temp>=48 && temp<=57) && prev!='n')
+           {
+                prev='n';
+                d->fieldType[d->fieldCount]='n';
+                d->fieldPosition[d->fieldCount]=i;
+                d->fieldCount+=1;
+            }
+        else if(!((temp>=97 && temp<=122) || (temp>=65&&temp<=90)) && !(temp>=48 && temp<=57) )
+           {
+             prev=0;
+             d->buffer[i]='\0';
+           }
+        i++;
+   }
+}
+
+char* getFieldString(USER_DATA* data, uint8_t fieldNumber)
+{
+  if(fieldNumber<=data->fieldCount)
+      {
+        return &(data->buffer[data->fieldPosition[fieldNumber]]);
+      }
+  else
+      return -1;
+}
+
+int32_t alphabetToInteger(char* numStr)
+{
+    int32_t num=0;
+    while (*numStr != 0)
+      {
+        if(*numStr >= 48 && *numStr <= 57)
+        {
+              num = num*10 + ((*numStr) - 48);
+              numStr++;
+        }
+
+      }
+    return num;
+}
+
+bool stringCompare(const char* str1,const char* str2)
+{
+   bool equal = true;
+   while(*str1 != 0 || *str2 != 0)
+   {
+       if((*str1 == 0 && *str2 != 0) || (*str1 != 0 && *str2 ==0))
+           return false;
+
+       if(!(*str1 == *str2 || (*str1 + 32) == *str2 || *str1 == (*str2+32) || (*str1 - 32) == *str2 || *str1 == (*str2 - 32)))
+       {
+           equal = false;
+           break;
+       }
+
+       str1++;
+       str2++;
+   }
+   return equal;
+}
+
+int32_t getFieldInteger(USER_DATA* data, uint8_t fieldNumber)
+{
+    if (fieldNumber<=data->fieldCount && data->fieldType[fieldNumber]=='n')
+    {
+        return alphabetToInteger(getFieldString(data, fieldNumber));
+    }
+    else
+        return 0;
+}
+
+uint32_t hexToInt(char* hex)
+{
+    uint32_t dec = 0;
+    uint8_t count = 0;
+
+    while(*hex != 0)
+    {
+        hex++;
+        count++;
+    }
+
+    hex = hex - count;
+
+    while (*hex != 0)
+    {
+        uint8_t character = *hex;
+        uint32_t temp;
+
+        if (character >= 48 && character <= 57)
+        {
+            temp = character - 48;
+            uint8_t i = 0;
+            for (i=0; i < count-1; i++)
+            {
+                temp = temp * 16;
+            }
+
+            count--;
+        }
+
+        else if ((character >= 65 && character <= 70 ) || (character >= 97 && character <= 102))
+               {
+                    if (character >= 65 && character <= 70 )
+                        temp = character - 55;
+
+                    else
+                        temp = character - 87;
+
+                    uint8_t i = 0;
+                    for (i=0; i < count-1; i++)
+                    {
+                        temp = temp * 16;
+                    }
+                    count--;
+               }
+        dec = dec + temp;
+        hex++;
+    }
+    return dec;
+}
+
+bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
+{
+ if(stringCompare(strCommand,getFieldString(data,0)) && (data->fieldCount)>minArguments)
+     return true;
+ return false;
+}
+
+void ps(void)
+{
+    putsUart0("Name\tPID\t%CPU\t\n\r");
+}
+
+void ipcs(void)
+{
+    putsUart0("Semaphore Name\tCount\tWaiting THreads\t\n\r");
+}
+
+void kill(uint32_t pid)
+{
+    __asm("  svc  #50");
+}
+
+void pi(bool on)
+{
+    if (on)
+        putsUart0("PI on\n");
+    else
+        putsUart0("PI off\n");
+}
+
+void preempt(bool on)
+{
+    if (on)
+        putsUart0("Preempt on\n");
+    else
+        putsUart0("Preempt off\n");
+}
+
+void sched(bool prio_on)
+{
+    if (prio_on)
+        putsUart0("sched prio\n");
+    else
+        putsUart0("sched rr\n");
+}
+
+void pidof(char name[])
+{
+    putsUart0(name);
+    putsUart0(" launched\n");
+}
+
+void reboot(void)
+{
+//    char q = 0;
+//    while(q != 'y' && q != 'Y' && q != 'N' && q != 'n')
+//      {
+//        putsUart0("Reboot (y/n)?\n");
+//        q=getcUart0();
+//      }
+//
+//    if (q == 'y' || q == 'Y')
+//        NVIC_APINT_R |= 4;
+//    else
+//        return;
+    __asm(" svc  #51");
+}
+
+
+void run(char* Process_Name)
+{
+    __asm(" svc   #52");
+}
+
+
 void shell()
 {
-    while (true)
+    USER_DATA data;
+    while(1)
     {
+    putsUart0("\r");
+    getsUart0(&data);
+    putsUart0("\n\r");
+    putsUart0(data.buffer);
+    putsUart0("\n\r");
+
+    parseFields(&data);
+    bool valid=false;
+
+
+    if(isCommand(&data,"ps",0))
+    {
+       ps();
+       valid = true;
     }
+
+    else if (isCommand(&data, "ipcs", 0))
+    {
+        ipcs();
+        valid = true;
+    }
+
+    else if (isCommand(&data, "kill", 1))
+    {
+        kill(hexToInt(getFieldString(&data, 1)));
+        valid = true;
+    }
+
+    else if (isCommand(&data, "pi", 1))
+    {
+        char* ONOFF = getFieldString(&data, 1);
+        if (stringCompare("ON", ONOFF) || stringCompare("OFF", ONOFF))
+        {
+            pi(stringCompare(ONOFF, "ON"));
+            putsUart0("\r\ntruing\n");
+            valid = true;
+        }
+    }
+
+    else if (isCommand(&data, "preempt", 1))
+    {
+        char* ONOFF = getFieldString(&data, 1);
+        if (stringCompare("ON", ONOFF) || stringCompare("OFF", ONOFF))
+        {
+            preempt(stringCompare(ONOFF, "ON"));
+            valid = true;
+        }
+
+    }
+
+    else if (isCommand(&data, "sched", 1))
+    {
+        char* PR = getFieldString(&data, 1);
+        if (stringCompare("PRIO", getFieldString(&data, 1)) || stringCompare("RR", getFieldString(&data, 1)))
+        {
+            sched(stringCompare("PRIO", getFieldString(&data, 1)));
+            valid = true;
+        }
+    }
+
+    else if (isCommand(&data, "pidof", 1))
+    {
+        pidof(getFieldString(&data, 1));
+        valid = true;
+    }
+
+    else if (isCommand(&data, "run", 1))
+    {
+      run(getFieldString(&data, 1));
+
+      valid = true;
+    }
+
+    else if (isCommand(&data, "reboot", 0))
+    {
+        valid = true;
+        reboot();
+    }
+
+
+    if(!valid)
+        putsUart0("\rInvalid command\n");
+
+    }
+
 }
 
 //-----------------------------------------------------------------------------
@@ -877,18 +1314,18 @@ int main(void)
 
     // Add required idle process at lowest priority
       ok =  createThread(idle, "Idle", 15, 1024);
-  //  ok &= createThread(idle2, "Idle2", 15, 1024);  //cod & discard
+      //ok &= createThread(idle2, "Idle2", 15, 1024);  //cod & discard
 
 //    // Add other processes
-//    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
-//      ok & = createThread(flash4Hz, "Flash4Hz", 8, 1024);
+      ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
+      ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
       ok &= createThread(oneshot, "OneShot", 4, 1024);
-//    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
-//    ok &= createThread(debounce, "Debounce", 12, 1024);
-//    ok &= createThread(important, "Important", 0, 1024);
-//    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-//    ok &= createThread(errant, "Errant", 8, 1024);
-//    ok &= createThread(shell, "Shell", 8, 1024);
+      ok &= createThread(readKeys, "ReadKeys", 12, 1024);
+      ok &= createThread(debounce, "Debounce", 12, 1024);
+      ok &= createThread(important, "Important", 0, 1024);
+      ok &= createThread(uncooperative, "Uncoop", 10, 1024);
+      ok &= createThread(errant, "Errant", 8, 1024);
+      ok &= createThread(shell, "Shell", 8, 1024);
 
     // Start up RTOS
     if (ok)

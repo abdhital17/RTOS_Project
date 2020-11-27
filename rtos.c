@@ -158,6 +158,13 @@ struct _tcb
 
 
 
+uint32_t CPU_TIME [2][MAX_TASKS + 2] = {0};
+uint8_t pingpong = 0;
+uint32_t TOTALTIME = 0;
+uint8_t  systickCount = 0;
+
+#define TOTAL_TIME_INDEX     13
+#define KERNEL_TIME_INDEX    12
 //-----------------------------------------------------------------------------
 // RTOS Kernel Functions
 //-----------------------------------------------------------------------------
@@ -247,9 +254,33 @@ void PrintIntToHex(uint32_t value)
             putcUart0('0');
         i++;
     }
+}
+
+
+void getIntString(uint32_t num)
+{
+    uint32_t temp = num;
+    uint32_t length = 0;
+    char getBack[2];
+    while (temp != 0)
+    {
+        temp = temp/10;
+        length++;
+    }
+
+    uint8_t i =0;
+    for(i=1; i <=length; i++)
+    {
+        char c = (num % 10) + '0';
+        num = num/10;
+        putcUart0(c);
+        //getBack[i] = c;
+    }
+    //getBack[length - 1] = '\0';
 
 
 }
+
 
 bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackBytes)
 {
@@ -367,6 +398,7 @@ void startRtos()
     setASPbit();
 
     _fn fn = tcb[taskCurrent].pid;
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;
     fn();
 }
 
@@ -417,6 +449,14 @@ void systickIsr()
                 tcb[count].state = STATE_READY;
         }
     }
+
+    if (systickCount == 100)
+    {
+        pingpong = 1 - pingpong;
+        systickCount = 0;
+    }
+
+    systickCount++;
 }
 
 //function to push registers R4-11 to PSP in Isr when ASP = 1
@@ -454,12 +494,21 @@ void pendSvIsr()
     PushRegstoPSP();
     tcb[taskCurrent].spInit = getPSPaddress();
 
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                // turn-off timer
+    TIMER1_IMR_R &= ~TIMER_IMR_TATOIM;              // turn-off interrupts
+    CPU_TIME [pingpong][taskCurrent] = TIMER1_TAV_R;
+    CPU_TIME [pingpong][TOTAL_TIME_INDEX] += CPU_TIME[pingpong][taskCurrent];
+
+
+
     taskCurrent=rtosScheduler();
 
     if(tcb[taskCurrent].state == STATE_READY)
     {
         setPSPaddress(tcb[taskCurrent].spInit);
         PopRegsFromPSP();
+        TIMER1_TAV_R=0;
+        TIMER1_CTL_R |= TIMER_CTL_TAEN;  // turn on timer for this thread
     }
 
     else
@@ -494,6 +543,9 @@ void pendSvIsr()
         *(psp_add) = 32;
 
         setPSPaddress(psp_add);
+
+        TIMER1_TAV_R=0;
+        TIMER1_CTL_R |= TIMER_CTL_TAEN;  // turn on timer for this thread
      }
 
 }
@@ -627,6 +679,35 @@ void svCallIsr()
 
                break;
 
+       case 53:
+               putsUart0("Name\tPID\t%CPU\t\n\r");
+               ind = 0;
+               CPU_TIME [1 - pingpong] [KERNEL_TIME_INDEX] = 4000000 - CPU_TIME [1 - pingpong] [TOTAL_TIME_INDEX];
+
+               for(ind = 0; ind<MAX_TASKS+2; ind++)
+               {
+                   if(ind < MAX_TASKS)
+                   {
+                       putsUart0(tcb[ind].name);
+                       putsUart0("\t");
+                       PrintIntToHex(tcb[ind].pid);
+                       putsUart0("\t");
+                       uint32_t temporary = (CPU_TIME[1-pingpong][ind] * 10000)/4000000;
+
+                       //char* outString;
+
+                       getIntString(temporary/100);
+                       //putsUart0(outString);
+                       putcUart0('.');
+
+                       getIntString(temporary%100);
+                       //putsUart0(outString);
+                       putsUart0("\t\n\r");
+                   }
+
+               }
+
+
    }
 
 }
@@ -668,6 +749,7 @@ void initHw()
 
     // Enable clocks
     SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R4 | SYSCTL_RCGCGPIO_R0 | SYSCTL_RCGCGPIO_R5;
+    SYSCTL_RCGCTIMER_R |=SYSCTL_RCGCTIMER_R1;
     _delay_cycles(3);
 
     // Configure LED and pushbutton pins
@@ -685,7 +767,25 @@ void initHw()
 
     GPIO_PORTA_PUR_R |= PUSH_BUTTON_MASK_0 | PUSH_BUTTON_MASK_1 | PUSH_BUTTON_MASK_2 | PUSH_BUTTON_MASK_3 | PUSH_BUTTON_MASK_4 |PUSH_BUTTON_MASK_5;
     // enable internal pull-up for push button
+
+
+    // Configure Timer 1 as the time base
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                 // turn-off timer before reconfiguring
+    TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;           // configure as 32-bit timer (A+B)
+    TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACDIR;          // configure for periodic mode (count up)
+
+    TIMER1_TAILR_R =40000000;                         // set load value to 40E6 for 1 Hz interrupt rate
+    TIMER1_IMR_R = TIMER_IMR_TATOIM;                 // turn-on interrupts
+    NVIC_EN0_R |= 1 << (INT_TIMER1A-16);            // turn-on interrupt 37 (TIMER1A)
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;                // turn-on timer
 }
+
+void timer1Isr()
+{
+    TIMER1_TAV_R=0;
+    TIMER1_ICR_R = TIMER_ICR_TATOCINT;               // clear interrupt flag
+}
+
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
 uint8_t readPbs()
@@ -1126,7 +1226,8 @@ bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
 
 void ps(void)
 {
-    putsUart0("Name\tPID\t%CPU\t\n\r");
+    __asm("     svc #53");
+    //putsUart0("Name\tPID\t%CPU\t\n\r");
 }
 
 void ipcs(void)
@@ -1231,7 +1332,6 @@ void shell()
         if (stringCompare("ON", ONOFF) || stringCompare("OFF", ONOFF))
         {
             pi(stringCompare(ONOFF, "ON"));
-            putsUart0("\r\ntruing\n");
             valid = true;
         }
     }

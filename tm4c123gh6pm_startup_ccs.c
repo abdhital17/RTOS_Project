@@ -58,6 +58,7 @@ extern uint32_t __STACK_TOP;
 extern void pendSvIsr(void);
 extern void svCallIsr(void);
 extern void systickIsr(void);
+extern void timer1Isr(void);
 
 
 //*****************************************************************************
@@ -108,7 +109,7 @@ void (* const g_pfnVectors[])(void) =
     IntDefaultHandler,                      // Watchdog timer
     IntDefaultHandler,                      // Timer 0 subtimer A
     IntDefaultHandler,                      // Timer 0 subtimer B
-    IntDefaultHandler,                      // Timer 1 subtimer A
+    timer1Isr,                              // Timer 1 subtimer A
     IntDefaultHandler,                      // Timer 1 subtimer B
     IntDefaultHandler,                      // Timer 2 subtimer A
     IntDefaultHandler,                      // Timer 2 subtimer B

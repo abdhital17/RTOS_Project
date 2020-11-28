@@ -117,6 +117,7 @@ typedef struct _semaphore
     uint16_t count;
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
+    char     name[16];  //store semaphore name here
 } semaphore;
 
 semaphore semaphores[MAX_SEMAPHORES];
@@ -247,7 +248,7 @@ void PrintIntToHex(uint32_t value)
        i++;
     }
 
-    putsUart0("0x");
+    //putsUart0("0x");
     i=0;
     while(i <= 7)
     {
@@ -388,7 +389,7 @@ void setThreadPriority(_fn fn, uint8_t priority)
 {
 }
 
-int8_t createSemaphore(uint8_t count)
+int8_t createSemaphore(uint8_t count, char name[])
 {
     int8_t index = -1;
     if (semaphoreCount < MAX_SEMAPHORES)
@@ -396,6 +397,14 @@ int8_t createSemaphore(uint8_t count)
         semaphores[semaphoreCount].count = count;
         index = semaphoreCount;
         semaphoreCount++;
+
+        uint8_t i = 0;
+        while(name[i] != 0)
+        {
+            semaphores[index].name[i] = name[i];
+            i++;
+        }
+        semaphores[index].name[i] = '\0';
     }
     return index;
 }
@@ -770,6 +779,29 @@ void svCallIsr()
                {
                    putsUart0(r0);
                    putsUart0(" not found\n\r");
+               }
+               break;
+
+               //ipcs
+       case 55:
+               ind = 0;
+               for (ind = 0; ind< MAX_SEMAPHORES; ind++)
+               {
+                  if(semaphores[ind].queueSize > 0)
+                  {
+                       putsUart0(semaphores[ind].name);
+                       putsUart0("\t");
+                       getIntString(semaphores[ind].count);
+                       putsUart0("\t");
+
+                       uint8_t waiting = 0;
+                       for (waiting=0; waiting<semaphores[ind].queueSize; waiting++)
+                       {
+                           putsUart0(tcb[semaphores[ind].processQueue[waiting]].name);
+                           putsUart0("\n");
+                       }
+                       putsUart0("\r");
+                   }
                }
                break;
    }
@@ -1297,6 +1329,7 @@ void ps(void)
 void ipcs(void)
 {
     putsUart0("Semaphore Name\tCount\tWaiting THreads\t\n\r");
+    __asm("     svc #55");
 }
 
 void kill(uint32_t pid)
@@ -1461,10 +1494,10 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1);
-    keyReleased = createSemaphore(0);
-    flashReq = createSemaphore(5);
-    resource = createSemaphore(1);
+    keyPressed = createSemaphore(1, "keyPressed");
+    keyReleased = createSemaphore(0, "keyReleased");
+    flashReq = createSemaphore(5, "flashReq");
+    resource = createSemaphore(1, "resource");
 
     // Add required idle process at lowest priority
       ok =  createThread(idle, "Idle", 15, 1024);

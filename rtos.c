@@ -153,11 +153,14 @@ struct _tcb
     int8_t currentPriority;        // used for priority inheritance
     uint32_t ticks;                // ticks until sleep complete
     char name[16];                 // name of task used in ps command
+    uint8_t nameLength;             //length of name stored
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
 
 
 
+
+//CPU Time
 uint32_t CPU_TIME [2][MAX_TASKS + 2] = {0};
 uint8_t pingpong = 0;
 uint32_t TOTALTIME = 0;
@@ -261,7 +264,9 @@ void getIntString(uint32_t num)
 {
     uint32_t temp = num;
     uint32_t length = 0;
-    char getBack[2];
+    char getBack[3] ={'0','0',0};
+    //getBack[2] = 0;
+
     while (temp != 0)
     {
         temp = temp/10;
@@ -269,16 +274,24 @@ void getIntString(uint32_t num)
     }
 
     uint8_t i =0;
-    for(i=1; i <=length; i++)
+
+    if (length == 2)
     {
-        char c = (num % 10) + '0';
-        num = num/10;
-        putcUart0(c);
-        //getBack[i] = c;
+        for(i=1; i <= length; i++)
+        {
+            char c = (num % 10) + '0';
+            num = num/10;
+//        putcUart0(c);
+            getBack[length - i] = c;
+        }
     }
-    //getBack[length - 1] = '\0';
 
+    else if (length == 1)
+    {
+        getBack[1] = (num % 10) + '0';
+    }
 
+    putsUart0(getBack);
 }
 
 
@@ -314,6 +327,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
                 }
                 tcb[i].name[j] = name [j];
             }
+            tcb[i].nameLength = j;
 
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
@@ -454,6 +468,12 @@ void systickIsr()
     {
         pingpong = 1 - pingpong;
         systickCount = 0;
+        uint8_t i = 0;
+        while (i < (MAX_TASKS + 2))
+        {
+            CPU_TIME[pingpong][i] = 0;
+            i++;
+        }
     }
 
     systickCount++;
@@ -496,8 +516,8 @@ void pendSvIsr()
 
     TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                // turn-off timer
     TIMER1_IMR_R &= ~TIMER_IMR_TATOIM;              // turn-off interrupts
-    CPU_TIME [pingpong][taskCurrent] = TIMER1_TAV_R;
-    CPU_TIME [pingpong][TOTAL_TIME_INDEX] += CPU_TIME[pingpong][taskCurrent];
+    CPU_TIME [pingpong][taskCurrent] += TIMER1_TAV_R;
+    CPU_TIME [pingpong][TOTAL_TIME_INDEX] += TIMER1_TAV_R;
 
 
 
@@ -664,7 +684,7 @@ void svCallIsr()
 
                        else
                        {
-                           putsUart0(Process_Name);
+                           putsUart0(tcb[ind].name);
                            putsUart0(" already running\n\r");
                        }
                        break;
@@ -680,19 +700,25 @@ void svCallIsr()
                break;
 
        case 53:
-               putsUart0("Name\tPID\t%CPU\t\n\r");
+               putsUart0("Name\t\t\tPID\t\t\t%CPU\t\n\r\n");
                ind = 0;
                CPU_TIME [1 - pingpong] [KERNEL_TIME_INDEX] = 4000000 - CPU_TIME [1 - pingpong] [TOTAL_TIME_INDEX];
+               uint32_t temporary = 0;
 
                for(ind = 0; ind<MAX_TASKS+2; ind++)
                {
-                   if(ind < MAX_TASKS)
+                   if(ind < MAX_TASKS && tcb[ind].state != STATE_INVALID)
                    {
                        putsUart0(tcb[ind].name);
-                       putsUart0("\t");
+
+                       if(tcb[ind].nameLength >=8)
+                           putsUart0("\t\t");
+                       else
+                           putsUart0("\t\t\t");
+
                        PrintIntToHex(tcb[ind].pid);
-                       putsUart0("\t");
-                       uint32_t temporary = (CPU_TIME[1-pingpong][ind] * 10000)/4000000;
+                       putsUart0("\t\t");
+                       temporary = (CPU_TIME[1-pingpong][ind])/400;
 
                        //char* outString;
 
@@ -707,7 +733,16 @@ void svCallIsr()
 
                }
 
+               temporary = (CPU_TIME[1-pingpong][KERNEL_TIME_INDEX])/400;
+               putsUart0("\nKernel Time\t\t\t\t\t");
+               getIntString(temporary/100);
+               putcUart0('.');
+               getIntString(temporary%100);
+               putsUart0("\t\n\r");
 
+               putsUart0("TOTAL\t\t\t\t\t\t");
+               putsUart0("100.00");
+               putsUart0("\t\n\r");
    }
 
 }
@@ -782,7 +817,7 @@ void initHw()
 
 void timer1Isr()
 {
-    TIMER1_TAV_R=0;
+    //TIMER1_TAV_R=0;
     TIMER1_ICR_R = TIMER_ICR_TATOCINT;               // clear interrupt flag
 }
 
@@ -1251,17 +1286,17 @@ void pi(bool on)
 void preempt(bool on)
 {
     if (on)
-        putsUart0("Preempt on\n");
+        putsUart0("Preempt on\n\r");
     else
-        putsUart0("Preempt off\n");
+        putsUart0("Preempt off\n\r");
 }
 
 void sched(bool prio_on)
 {
     if (prio_on)
-        putsUart0("sched prio\n");
+        putsUart0("priority scheduling mode on\n\r");
     else
-        putsUart0("sched rr\n");
+        putsUart0("round-robin scheduling mode on\n\r");
 }
 
 void pidof(char name[])
@@ -1272,17 +1307,6 @@ void pidof(char name[])
 
 void reboot(void)
 {
-//    char q = 0;
-//    while(q != 'y' && q != 'Y' && q != 'N' && q != 'n')
-//      {
-//        putsUart0("Reboot (y/n)?\n");
-//        q=getcUart0();
-//      }
-//
-//    if (q == 'y' || q == 'Y')
-//        NVIC_APINT_R |= 4;
-//    else
-//        return;
     __asm(" svc  #51");
 }
 

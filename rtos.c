@@ -649,18 +649,21 @@ void svCallIsr()
                {
                    if (tcb[j].pid == r0)
                    {
-                       tcb[j].state = STATE_KILLED;
                        check = true;
+                       if (stringCompare(tcb[j].name, "idle"))
+                       {
+                           putsUart0("Cannot kill idle\n\r");
+                           break;
+                       }
+                       tcb[j].state = STATE_KILLED;
+                       PrintIntToHex(r0);
+                       putsUart0(" Killed\n\r");
                        break;
                    }
                    j++;
                }
-               if (check)
-               {
-                   PrintIntToHex(r0);
-                   putsUart0(" Killed\n\r");
-               }
-               else
+
+               if (!check)
                    putsUart0("pid not found\n\r");
 
                break;
@@ -728,7 +731,7 @@ void svCallIsr()
 
                        getIntString(temporary%100);
                        //putsUart0(outString);
-                       putsUart0("\t\n\r");
+                       putsUart0(" %\t\n\r");
                    }
 
                }
@@ -738,11 +741,37 @@ void svCallIsr()
                getIntString(temporary/100);
                putcUart0('.');
                getIntString(temporary%100);
-               putsUart0("\t\n\r");
+               putsUart0(" %\t\n\r");
 
                putsUart0("TOTAL\t\t\t\t\t\t");
-               putsUart0("100.00");
+               putsUart0("100.00%");
                putsUart0("\t\n\r");
+               break;
+
+               //pidOf
+       case 54:
+               ind = 0;
+               bool pidFound = false;
+               char* checkSTRING = (char*) r0;
+               for (ind = 0; ind < MAX_TASKS; ind++)
+                   {
+                       if (stringCompare(checkSTRING, tcb[ind].name))
+                       {
+                           putsUart0("pid of ");
+                           putsUart0(checkSTRING);
+                           putsUart0(": ");
+                           PrintIntToHex(tcb[ind].pid);
+                           putsUart0("\n\r");
+                           pidFound = true;
+                           break;
+                       }
+                   }
+               if (!pidFound)
+               {
+                   putsUart0(r0);
+                   putsUart0(" not found\n\r");
+               }
+               break;
    }
 
 }
@@ -1301,8 +1330,9 @@ void sched(bool prio_on)
 
 void pidof(char name[])
 {
-    putsUart0(name);
-    putsUart0(" launched\n");
+//    putsUart0(name);
+//    putsUart0(" launched\n");
+    __asm("     SVC  #54");
 }
 
 void reboot(void)

@@ -138,7 +138,7 @@ uint8_t keyPressed, keyReleased, flashReq, resource;
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 
-bool priorityScheduling = false; //true if priority scheduling mode
+bool priorityScheduling = true; //true if priority scheduling mode
                                  //false if round-robin scheduling mode
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -162,10 +162,10 @@ struct _tcb
 
 
 //CPU Time
-uint32_t CPU_TIME [2][MAX_TASKS + 2] = {0};
-uint8_t pingpong = 0;
-uint32_t TOTALTIME = 0;
-uint8_t  systickCount = 0;
+uint32_t CPU_TIME [2][MAX_TASKS + 2] = {0}; //data structure to hold the data required to calculate the CPU time percentage
+uint8_t pingpong = 0;                       //variable used to switch between two
+                                            //buffers in the pingpong buffer system
+uint8_t  systickCount = 0;                  //increments with each sysTick ISR call. On every 100th call, this variable is cleared
 
 #define TOTAL_TIME_INDEX     13
 #define KERNEL_TIME_INDEX    12
@@ -207,21 +207,30 @@ int rtosScheduler()
 
     else        //priority scheduling
     {
-        uint8_t i = taskCurrent + 1;
-        while (i != taskCurrent)
+        bool found = false;
+        uint8_t checkPriority = tcb[taskCurrent].priority;
+      while(!found) {
+          uint8_t i = taskCurrent + 1;
+          while (i != taskCurrent)
         {
             if (tcb[i].state == STATE_READY || tcb[i].state == STATE_UNRUN)
             {
-                if (tcb[i].currentPriority < task)
+                if (tcb[i].currentPriority < checkPriority)
                 {
+                    checkPriority = tcb[i].currentPriority;
                     task = i;
+                    found = true;
                 }
             }
 
             i = (i + 1) % MAX_TASKS;
         }
 
-        return task;
+           if (!found)
+               checkPriority++;
+
+                   }
+      return task;
     }
 
 }
@@ -730,7 +739,7 @@ void svCallIsr()
 
                        PrintIntToHex(tcb[ind].pid);
                        putsUart0("\t\t");
-                       temporary = (CPU_TIME[1-pingpong][ind])/400;
+                       temporary = (CPU_TIME[1-pingpong][ind])/400;     //         temporary = rawvalue/40E5 * 10000 = rawvalue/400; 40E5 because we clear it every N ms(=100 ms)
 
                        //char* outString;
 
@@ -887,22 +896,22 @@ void timer1Isr()
 uint8_t readPbs()
 {
     uint8_t readValue = 0;
-    if(~PUSH_BUTTON0)
+    if(!PUSH_BUTTON0)
         readValue += 1;
 
-    if(~PUSH_BUTTON1)
+    if(!PUSH_BUTTON1)
         readValue += 2;
 
-    if(~PUSH_BUTTON2)
+    if(!PUSH_BUTTON2)
         readValue += 4;
 
-    if(~PUSH_BUTTON3)
+    if(!PUSH_BUTTON3)
         readValue += 8;
 
-    if(~PUSH_BUTTON4)
+    if(!PUSH_BUTTON4)
         readValue += 16;
 
-    if(~PUSH_BUTTON5)
+    if(!PUSH_BUTTON5)
         readValue += 32;
 
     return readValue;

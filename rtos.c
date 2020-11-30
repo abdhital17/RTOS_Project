@@ -94,9 +94,14 @@ static uint32_t stack [7168];
 uint32_t heap_pointer = 0x20001000;
 
 //assembly functions declaration
-extern uint32_t getPSPaddress();
-extern void setASPbit();
+extern void unprivilegedMode();
+extern void privilegedMode();
 extern void setPSPaddress(uint32_t address);
+extern uint32_t getPSPaddress();
+extern uint32_t getMSPaddress();
+extern void setASPbit();
+
+
 extern uint8_t getSVCNumber();
 
 
@@ -140,6 +145,10 @@ uint8_t taskCount = 0;     // total number of valid tasks
 
 bool priorityScheduling = true; //true if priority scheduling mode
                                  //false if round-robin scheduling mode
+bool preemptON = true;         //true if preemption is on
+                                //false if off
+bool piON = true;              //true if priority inheritance on
+                               //false if priority inheritance off
 
 // REQUIRED: add store and management for the memory used by the thread stacks
 //           thread stacks must start on 1 kiB boundaries so mpu can work correctly
@@ -156,6 +165,8 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     uint8_t nameLength;             //length of name stored
     void *semaphore;               // pointer to the semaphore that is blocking the thread
+
+    uint32_t MPUpermissions;        //permissions mask to determine which subregion of MPU to give access to the task
 } tcb[MAX_TASKS];
 
 
@@ -173,6 +184,63 @@ uint8_t  systickCount = 0;                  //increments with each sysTick ISR c
 // RTOS Kernel Functions
 //-----------------------------------------------------------------------------
 
+void init_MPU()
+{
+//    //region #0 for the background region
+    //RW access (no X access) for both privileged and unprivileged mode for RAM, bitband and peripherals
+    NVIC_MPU_NUMBER_R |= 0x0;        //select region 0
+    NVIC_MPU_BASE_R   |= 0x00000000; //addr=0x0000.0000 for complete 4GiB of memory, valid=0, region already set
+    NVIC_MPU_ATTR_R   |= 0x1304003E; //S=0, C=1, B=0, size=31(11111 for 4GiB), XN=1(instruction fetch disabled), TEX=000
+    NVIC_MPU_ATTR_R   |= 0x1;        //MPU  region enable
+//
+//
+    //region #1 for the 256kiB flash memory
+    //RWX access for both privileged and unprivileged mode
+    NVIC_MPU_NUMBER_R |= 0x1;        //select region 1
+    NVIC_MPU_BASE_R   |= 0x00000000; //addr=0x00000000 for base address of flash bits, 256KiB, valid =0, region already set in the NUMBER register
+    NVIC_MPU_ATTR_R   |= 0x03020022; //S=0, C=1, B=0, size=17(10001) for 256KB, XN=0(instruction fetch enabled), TEX=000
+    NVIC_MPU_ATTR_R   |= 0x1;        //MPU  region enable
+//
+//
+//
+//    //we divide the 32KiB SRAM into 4 different regions in the MPU
+//    //each of those regions in the MPU will protect 8KiB of SRAM each
+//    //the 8KiB within the regions are further divided into 8 subregions of 1KiB each
+//
+    //first region of SRAM- region 2
+    NVIC_MPU_NUMBER_R   = 0x2;       //select region 2
+    NVIC_MPU_BASE_R    |= 0x20000000;//addr=0x20000000,  valid =0, region already set in NUMBER register
+    NVIC_MPU_ATTR_R    |= 0x11060018;//for internal SRAM S=1, C=1, B=0, size=12(1100) for 8KiB, XN=1(instruction fetch disabled), TEX=000
+                                     //all 8 of the subregions enabled
+    NVIC_MPU_ATTR_R    |= 0x1;
+
+    //second region of SRAM- region 3
+    NVIC_MPU_NUMBER_R   = 0x3;       //select region 3
+    NVIC_MPU_BASE_R    |= 0x20002000;//addr=0x20002000,  valid =0, region already set in NUMBER register
+    NVIC_MPU_ATTR_R    |= 0x11060018;//for internal SRAM S=1, C=1, B=0, size=12(1100) for 8KiB, XN=1(instruction fetch disabled), TEX=000
+                                     //all 8 of the subregions enabled
+    NVIC_MPU_ATTR_R    |= 0x1;
+
+    //third region of SRAM- region 4
+    NVIC_MPU_NUMBER_R   = 0x4;       //select region 4
+    NVIC_MPU_BASE_R    |= 0x20004000;//addr=0x20004000,  valid =0, region already set in NUMBER register
+    NVIC_MPU_ATTR_R    |= 0x11060018;//for internal SRAM S=1, C=1, B=0, size=12(1100) for 8KiB, XN=1(instruction fetch disabled), TEX=000
+                                     //all 8 of the subregions enabled
+    NVIC_MPU_ATTR_R    |= 0x1;
+
+    //fourth region of SRAM- region 5
+    NVIC_MPU_NUMBER_R   = 0x5;       //select region 5
+    NVIC_MPU_BASE_R    |= 0x20006000;//addr=0x20006000,  valid =0, region already set in NUMBER register
+    NVIC_MPU_ATTR_R    |= 0x11060018;//for internal SRAM S=1, C=1, B=0, size=12(1100) for 8KiB, XN=1(instruction fetch disabled), TEX=000
+                                     //all but the last subregion enabled
+    NVIC_MPU_ATTR_R    |= 0x1;
+
+//
+    NVIC_MPU_CTRL_R    |= 0x7;       //MPU enable, default region enable, MPU enabled during hard faults
+
+
+}
+
 // REQUIRED: initialize systick for 1ms system timer
 void initRtos()
 {
@@ -185,6 +253,7 @@ void initRtos()
         tcb[i].state = STATE_INVALID;
         tcb[i].pid = 0;
     }
+    init_MPU();
 }
 
 // REQUIRED: Implement prioritization to 16 levels
@@ -208,8 +277,9 @@ int rtosScheduler()
     else        //priority scheduling
     {
         bool found = false;
-        uint8_t checkPriority = tcb[taskCurrent].priority;
-      while(!found) {
+        uint8_t checkPriority = tcb[taskCurrent].currentPriority;
+      while(!found)
+      {
           uint8_t i = taskCurrent + 1;
           while (i != taskCurrent)
         {
@@ -228,8 +298,7 @@ int rtosScheduler()
 
            if (!found)
                checkPriority++;
-
-                   }
+      }
       return task;
     }
 
@@ -342,10 +411,20 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
 
+
+            tcb[i].MPUpermissions = 0xFF;
+            //uint8_t numSubRegions = stackBytes/1024;
+            tcb[i].MPUpermissions >>= (8-stackBytes/1024);
+            tcb[i].MPUpermissions <<= ((heap_pointer - 0x20000000)/0x400);
+
+            uint32_t trash = tcb[i].MPUpermissions;
+
+
             //moving the heap pointer to the stack space of this thread
             tcb[i].sp = heap_pointer;
             heap_pointer += stackBytes;
             tcb[i].spInit = heap_pointer;
+
 
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
@@ -396,6 +475,7 @@ void destroyThread(_fn fn)
 // REQUIRED: modify this function to set a thread priority
 void setThreadPriority(_fn fn, uint8_t priority)
 {
+    __asm("     SVC  #56");
 }
 
 int8_t createSemaphore(uint8_t count, char name[])
@@ -429,8 +509,13 @@ void startRtos()
     tcb[taskCurrent].state = STATE_READY;
     setASPbit();
 
+
     _fn fn = tcb[taskCurrent].pid;
     TIMER1_CTL_R |= TIMER_CTL_TAEN;
+    NVIC_MPU_NUMBER_R   = 0x3;       //select region 3
+    NVIC_MPU_ATTR_R   |= 0x00000400;//for internal SRAM S=1, C=1, B=0, size=12(1100) for 8KiB, XN=1(instruction fetch disabled), TEX=000
+
+    unprivilegedMode();
     fn();
 }
 
@@ -495,6 +580,12 @@ void systickIsr()
     }
 
     systickCount++;
+
+    //start preemption code here
+    if (preemptON)
+        NVIC_INT_CTRL_R   |= 0x10000000;
+
+    //end preemption code here
 }
 
 //function to push registers R4-11 to PSP in Isr when ASP = 1
@@ -540,6 +631,15 @@ void pendSvIsr()
 
 
     taskCurrent=rtosScheduler();
+
+    uint32_t jklfsadjdsaf;
+    uint8_t i = 2;
+    for(i=2; i<6; i++)
+    {
+        NVIC_MPU_NUMBER_R   = i;
+        NVIC_MPU_ATTR_R |= ((tcb[taskCurrent].MPUpermissions >> 8*(i-2)) & 0xFF) << 8;
+        jklfsadjdsaf = ((tcb[taskCurrent].MPUpermissions >> 8*(i-2)) & 0xFF) << 8;
+    }
 
     if(tcb[taskCurrent].state == STATE_READY)
     {
@@ -633,6 +733,23 @@ void svCallIsr()
                    tcb[taskCurrent].semaphore = &semaphores[r0];
                    semaphores[r0].processQueue[semaphores[r0].queueSize] = taskCurrent;
                    (semaphores[r0].queueSize)++;
+
+
+                   //start editing priority inheritance here
+                   uint8_t piIndex = 0;
+                   bool EXIST = false;
+                   while (piIndex < MAX_TASKS && !EXIST)
+                   {
+                       if ((tcb[piIndex].semaphore == &semaphores[r0]) && tcb[piIndex].currentPriority > tcb[taskCurrent].currentPriority)
+                       {
+
+                           tcb[piIndex].currentPriority = tcb[taskCurrent].currentPriority;
+                           EXIST = true;
+                       }
+                       piIndex++;
+                   }
+                   //end editing priority inheritance here
+
                    NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
                }
                break;
@@ -645,6 +762,10 @@ void svCallIsr()
                    tcb[semaphores[r0].processQueue[0]].state = STATE_READY;
                    (semaphores[r0].count--);
 
+
+                   //start editing priority inheritance here
+                   tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
+                   //end editing priority inheritance here
 
                    uint8_t pQ = 0;
                    while(pQ < (semaphores[r0].queueSize - 1))
@@ -721,25 +842,25 @@ void svCallIsr()
                break;
 
        case 53:
-               putsUart0("Name\t\t\tPID\t\t\t%CPU\t\n\r\n");
-               ind = 0;
+               putsUart0("Name\t\t\tPID\t\t\t%CPU\t\tPriority\n\r\n");
+               uint8_t ind1 = 0;
                CPU_TIME [1 - pingpong] [KERNEL_TIME_INDEX] = 4000000 - CPU_TIME [1 - pingpong] [TOTAL_TIME_INDEX];
                uint32_t temporary = 0;
 
-               for(ind = 0; ind<MAX_TASKS+2; ind++)
+               for(ind1 = 0; ind1<MAX_TASKS+2; ind1++)
                {
-                   if(ind < MAX_TASKS && tcb[ind].state != STATE_INVALID)
+                   if(ind1 < MAX_TASKS && tcb[ind1].state != STATE_INVALID)
                    {
-                       putsUart0(tcb[ind].name);
+                       putsUart0(tcb[ind1].name);
 
-                       if(tcb[ind].nameLength >=8)
+                       if(tcb[ind1].nameLength >=8)
                            putsUart0("\t\t");
                        else
                            putsUart0("\t\t\t");
 
-                       PrintIntToHex(tcb[ind].pid);
+                       PrintIntToHex(tcb[ind1].pid);
                        putsUart0("\t\t");
-                       temporary = (CPU_TIME[1-pingpong][ind])/400;     //         temporary = rawvalue/40E5 * 10000 = rawvalue/400; 40E5 because we clear it every N ms(=100 ms)
+                       temporary = (CPU_TIME[1-pingpong][ind1])/400;     //         temporary = raw-value/40E5 * 10000 = raw-value/400; 40E5 because we clear it every N ms(=100 ms)
 
                        //char* outString;
 
@@ -749,7 +870,10 @@ void svCallIsr()
 
                        getIntString(temporary%100);
                        //putsUart0(outString);
-                       putsUart0(" %\t\n\r");
+                       putsUart0(" %\t\t");
+
+                       getIntString(tcb[ind1].currentPriority);
+                       putsUart0("\n\r");
                    }
 
                }
@@ -767,18 +891,18 @@ void svCallIsr()
                break;
 
                //pidOf
-       case 54:
-               ind = 0;
+       case 54: ;
+               uint8_t ind2 = 0;
                bool pidFound = false;
                char* checkSTRING = (char*) r0;
-               for (ind = 0; ind < MAX_TASKS; ind++)
+               for (ind2 = 0; ind2 < MAX_TASKS; ind2++)
                    {
-                       if (stringCompare(checkSTRING, tcb[ind].name))
+                       if (stringCompare(checkSTRING, tcb[ind2].name))
                        {
                            putsUart0("pid of ");
                            putsUart0(checkSTRING);
                            putsUart0(": ");
-                           PrintIntToHex(tcb[ind].pid);
+                           PrintIntToHex(tcb[ind2].pid);
                            putsUart0("\n\r");
                            pidFound = true;
                            break;
@@ -792,24 +916,37 @@ void svCallIsr()
                break;
 
                //ipcs
-       case 55:
-               ind = 0;
-               for (ind = 0; ind< MAX_SEMAPHORES; ind++)
+       case 55: ;
+               uint8_t ind3 = 0;
+               for (ind3 = 0; ind3< MAX_SEMAPHORES; ind3++)
                {
-                  if(semaphores[ind].queueSize > 0)
+                  if(semaphores[ind3].queueSize > 0)
                   {
-                       putsUart0(semaphores[ind].name);
+                       putsUart0(semaphores[ind3].name);
                        putsUart0("\t");
-                       getIntString(semaphores[ind].count);
+                       getIntString(semaphores[ind3].count);
                        putsUart0("\t");
 
                        uint8_t waiting = 0;
-                       for (waiting=0; waiting<semaphores[ind].queueSize; waiting++)
+                       for (waiting=0; waiting<semaphores[ind3].queueSize; waiting++)
                        {
-                           putsUart0(tcb[semaphores[ind].processQueue[waiting]].name);
+                           putsUart0(tcb[semaphores[ind3].processQueue[waiting]].name);
                            putsUart0("\n");
                        }
                        putsUart0("\r");
+                   }
+               }
+               break;
+
+               //setThreadPriority
+       case 56: ;
+               uint8_t ind4 = 0;
+               for (ind4 = 0; ind4 < MAX_TASKS; ind4++)
+               {
+                   if (tcb[ind4].pid == r0)
+                   {
+                       tcb[ind4].currentPriority = r1;
+                       break;
                    }
                }
                break;
@@ -817,9 +954,78 @@ void svCallIsr()
 
 }
 
+#define Line_Break "\n\r"
+
 // REQUIRED: code this function
 void mpuFaultIsr()
 {
+    NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
+       NVIC_SYS_HND_CTRL_R  &= ~0x2000;     //clearing the MPU fault pending bit at bit #13 of the NVIC_SYS_HNDCTRL register
+       //_delay_cycles(5);
+
+       putsUart0(Line_Break);
+       putsUart0("MPU Fault in process N \n\r");
+
+       putsUart0("PSP: ");
+       PrintIntToHex(getPSPaddress());
+       putsUart0(Line_Break);
+
+       putsUart0("MSP: ");
+       PrintIntToHex(getMSPaddress());
+       putsUart0(Line_Break);
+
+       putsUart0("MFault Flag: ");
+       PrintIntToHex(NVIC_FAULT_STAT_R & 0xFF); //accessing the MFault flags in the NVIC_FAULT_STAT_R at bits 0:7
+       putsUart0(Line_Break);
+
+
+       //Process Stack Dump
+       uint32_t* PSP_Address = (uint32_t*) getPSPaddress();
+
+
+       putsUart0("Offending instruction address: ");
+       PrintIntToHex(*(PSP_Address + 6));
+       putsUart0(Line_Break);
+
+       putsUart0("Offending Data address: ");
+       PrintIntToHex(NVIC_MM_ADDR_R);
+       putsUart0(Line_Break);
+
+       putsUart0("xPSR: ");
+       PrintIntToHex(*(PSP_Address + 7));
+       putsUart0(Line_Break);
+
+       putsUart0("PC:   ");
+       PrintIntToHex(*(PSP_Address + 6));
+       putsUart0(Line_Break);
+
+       putsUart0("LR:   ");
+       PrintIntToHex(*(PSP_Address + 5));
+       putsUart0(Line_Break);
+
+       putsUart0("R12:  ");
+       PrintIntToHex(*(PSP_Address + 4));
+       putsUart0(Line_Break);
+
+       putsUart0("R3:   ");
+       PrintIntToHex(*(PSP_Address + 3));
+       putsUart0(Line_Break);
+
+       putsUart0("R2:   ");
+       PrintIntToHex(*(PSP_Address + 2));
+       putsUart0(Line_Break);
+
+       putsUart0("R1:   ");
+       PrintIntToHex(*(PSP_Address + 1));
+       putsUart0(Line_Break);
+
+       putsUart0("R0:   ");
+       PrintIntToHex(*PSP_Address);
+       putsUart0(Line_Break);
+
+     //  NVIC_SYS_HND_CTRL_R  |= 0x400;
+
+
 }
 
 // REQUIRED: code this function

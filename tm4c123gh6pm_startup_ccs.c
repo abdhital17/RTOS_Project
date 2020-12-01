@@ -78,7 +78,7 @@ void (* const g_pfnVectors[])(void) =
     ResetISR,                               // The reset handler
     NmiSR,                                  // The NMI handler
     FaultISR,                               // The hard fault handler
-    mpuFaultIsr,                      // The MPU fault handler
+    mpuFaultIsr,                            // The MPU fault handler
     IntDefaultHandler,                      // The bus fault handler
     IntDefaultHandler,                      // The usage fault handler
     0,                                      // Reserved

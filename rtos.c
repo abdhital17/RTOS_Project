@@ -81,11 +81,8 @@
 #define PUSH_BUTTON_MASK_5 128
 
 
-//Service Call Number MACROS
-#define YIELD 10
-#define SLEEP 20
-#define WAIT  30
-#define POST  40
+#define Line_Break "\n\r"
+
 
 //allocation of 28KiB of heap starting from address 0x20001000 in SRAM
 #pragma DATA_SECTION(stack, ".heap")
@@ -103,10 +100,6 @@ extern void setASPbit();
 
 
 extern uint8_t getSVCNumber();
-
-
-
-
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
 //-----------------------------------------------------------------------------
@@ -129,7 +122,11 @@ semaphore semaphores[MAX_SEMAPHORES];
 
 uint8_t semaphoreCount = 0;
 
-uint8_t keyPressed, keyReleased, flashReq, resource;
+
+#define keyPressed  1
+#define keyReleased 2
+#define flashReq    3
+#define resource    4
 
 // task
 #define STATE_INVALID    0 // no task
@@ -145,9 +142,9 @@ uint8_t taskCount = 0;     // total number of valid tasks
 
 bool priorityScheduling = true; //true if priority scheduling mode
                                  //false if round-robin scheduling mode
-bool preemptON = true;         //true if preemption is on
+bool preemptON = false;         //true if preemption is on
                                 //false if off
-bool piON = true;              //true if priority inheritance on
+bool piON = false;              //true if priority inheritance on
                                //false if priority inheritance off
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -237,6 +234,8 @@ void init_MPU()
 
 //
     NVIC_MPU_CTRL_R    |= 0x7;       //MPU enable, default region enable, MPU enabled during hard faults
+
+    NVIC_SYS_HND_CTRL_R |= 0x70000;
 
 
 }
@@ -417,6 +416,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].MPUpermissions >>= (8-stackBytes/1024);
             tcb[i].MPUpermissions <<= ((heap_pointer - 0x20000000)/0x400);
 
+            //code and discard
             uint32_t trash = tcb[i].MPUpermissions;
 
 
@@ -478,24 +478,44 @@ void setThreadPriority(_fn fn, uint8_t priority)
     __asm("     SVC  #56");
 }
 
-int8_t createSemaphore(uint8_t count, char name[])
+//int8_t createSemaphore(uint8_t count, char name[])
+//{
+//    int8_t index = -1;
+//    if (semaphoreCount < MAX_SEMAPHORES)
+//    {
+//        semaphores[semaphoreCount].count = count;
+//        index = semaphoreCount;
+//        semaphoreCount++;
+//
+//        uint8_t i = 0;
+//        while(name[i] != 0)
+//        {
+//            semaphores[index].name[i] = name[i];
+//            i++;
+//        }
+//        semaphores[index].name[i] = '\0';
+//    }
+//    return index;
+//}
+
+
+bool createSemaphore(uint8_t s, uint8_t count, char name[])
 {
-    int8_t index = -1;
-    if (semaphoreCount < MAX_SEMAPHORES)
+    bool ok = (s < MAX_SEMAPHORES);
+    if (ok)
     {
-        semaphores[semaphoreCount].count = count;
-        index = semaphoreCount;
-        semaphoreCount++;
+        semaphores[s].count = count;
 
         uint8_t i = 0;
         while(name[i] != 0)
         {
-            semaphores[index].name[i] = name[i];
-            i++;
-        }
-        semaphores[index].name[i] = '\0';
+          semaphores[s].name[i] = name[i];
+          i++;
+         }
+        semaphores[s].name[i] = '\0';
+
     }
-    return index;
+    return ok;
 }
 
 
@@ -503,7 +523,7 @@ int8_t createSemaphore(uint8_t count, char name[])
 void startRtos()
 {
     taskCurrent = rtosScheduler();
-    uint32_t sp = tcb[taskCurrent].spInit;
+    uint32_t* sp = tcb[taskCurrent].spInit;
     setPSPaddress(sp);
 
     tcb[taskCurrent].state = STATE_READY;
@@ -512,10 +532,13 @@ void startRtos()
 
     _fn fn = tcb[taskCurrent].pid;
     TIMER1_CTL_R |= TIMER_CTL_TAEN;
-    NVIC_MPU_NUMBER_R   = 0x3;       //select region 3
-    NVIC_MPU_ATTR_R   |= 0x00000400;//for internal SRAM S=1, C=1, B=0, size=12(1100) for 8KiB, XN=1(instruction fetch disabled), TEX=000
+    NVIC_MPU_NUMBER_R   = 0x3;
+    NVIC_MPU_ATTR_R   |= 0x0F00;
 
     unprivilegedMode();
+
+//    uint32_t* trash = (uint32_t*) 0x200013fc;
+//    *trash = 0;
     fn();
 }
 
@@ -637,7 +660,10 @@ void pendSvIsr()
     for(i=2; i<6; i++)
     {
         NVIC_MPU_NUMBER_R   = i;
+        NVIC_MPU_ATTR_R &= ~(0xFF00);
         NVIC_MPU_ATTR_R |= ((tcb[taskCurrent].MPUpermissions >> 8*(i-2)) & 0xFF) << 8;
+
+        //code and discard
         jklfsadjdsaf = ((tcb[taskCurrent].MPUpermissions >> 8*(i-2)) & 0xFF) << 8;
     }
 
@@ -954,12 +980,11 @@ void svCallIsr()
 
 }
 
-#define Line_Break "\n\r"
 
 // REQUIRED: code this function
 void mpuFaultIsr()
 {
-    NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
+       NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
        NVIC_SYS_HND_CTRL_R  &= ~0x2000;     //clearing the MPU fault pending bit at bit #13 of the NVIC_SYS_HNDCTRL register
        //_delay_cycles(5);
 
@@ -989,6 +1014,11 @@ void mpuFaultIsr()
 
        putsUart0("Offending Data address: ");
        PrintIntToHex(NVIC_MM_ADDR_R);
+       putsUart0(Line_Break);
+
+
+       putsUart0("Offending thread: ");
+       putsUart0(tcb[taskCurrent].name);
        putsUart0(Line_Break);
 
        putsUart0("xPSR: ");
@@ -1023,6 +1053,7 @@ void mpuFaultIsr()
        PrintIntToHex(*PSP_Address);
        putsUart0(Line_Break);
 
+       tcb[taskCurrent].state = STATE_KILLED;
      //  NVIC_SYS_HND_CTRL_R  |= 0x400;
 
 
@@ -1064,8 +1095,8 @@ void initHw()
     _delay_cycles(3);
 
     // Configure LED and pushbutton pins
-    GPIO_PORTE_DIR_R |= GREEN_LED_MASK | RED_LED_MASK | YELLOW_LED_MASK | ORANGE_LED_MASK;   // bits 1 and 3 are outputs, other pins are inputs
-    GPIO_PORTE_DR2R_R |= GREEN_LED_MASK | RED_LED_MASK | YELLOW_LED_MASK | ORANGE_LED_MASK;  // set drive strength to 2mA (not needed since default configuration -- for clarity)
+    GPIO_PORTE_DIR_R |= GREEN_LED_MASK | RED_LED_MASK | YELLOW_LED_MASK | ORANGE_LED_MASK;
+    GPIO_PORTE_DR2R_R |= GREEN_LED_MASK | RED_LED_MASK | YELLOW_LED_MASK | ORANGE_LED_MASK;
     GPIO_PORTE_DEN_R |= GREEN_LED_MASK | RED_LED_MASK | YELLOW_LED_MASK | ORANGE_LED_MASK;
 
     GPIO_PORTF_DIR_R |= BLUE_LED_MASK;
@@ -1709,10 +1740,10 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1, "keyPressed");
-    keyReleased = createSemaphore(0, "keyReleased");
-    flashReq = createSemaphore(5, "flashReq");
-    resource = createSemaphore(1, "resource");
+    createSemaphore(keyPressed, 1, "keyPressed");
+    createSemaphore(keyReleased, 0, "keyReleased");
+    createSemaphore(flashReq, 5, "flashReq");
+    createSemaphore(resource, 1, "resource");
 
     // Add required idle process at lowest priority
       ok =  createThread(idle, "Idle", 15, 1024);

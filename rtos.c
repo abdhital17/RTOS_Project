@@ -178,8 +178,23 @@ uint8_t pingpong = 0;                       //variable used to switch between tw
 
 uint8_t  systickCount = 0;                  //increments with each sysTick ISR call. On every 100th call, this variable is cleared
 
+struct PSData
+{
+    char name[16];              //stores the name of a task
+    void *pid;                  //stores the pid of a task
+    uint16_t CPU;                //stores the CPU time % of a particular task
+    uint8_t prio;               //stores the priority of the task
+    uint16_t kernelTime;         //stores the kernel time; stored only at index[0] for convenience
+    uint8_t nameLength;          //stores the length of the name of task; required for print formatting purpose
+    uint8_t valid;           //valid bit; shell will print this entry only if this is set
+};
+
+
+
 #define TOTAL_TIME_INDEX     13
 #define KERNEL_TIME_INDEX    12
+
+
 //-----------------------------------------------------------------------------
 // RTOS Kernel Functions
 //-----------------------------------------------------------------------------
@@ -406,7 +421,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
                     tcb[i].name[j] = '\0';
                     break;
                 }
-                tcb[i].name[j] = name [j];
+                tcb[i].name[j] = name[j];
             }
             tcb[i].nameLength = j;
 
@@ -466,6 +481,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 // REQUIRED: modify this function to restart a thread
 void restartThread(_fn fn)
 {
+    __asm("   SVC  #60");
 }
 
 // REQUIRED: modify this function to destroy a thread
@@ -473,6 +489,7 @@ void restartThread(_fn fn)
 // NOTE: see notes in class for strategies on whether stack is freed or not
 void destroyThread(_fn fn)
 {
+    kill(fn);
 }
 
 // REQUIRED: modify this function to set a thread priority
@@ -827,7 +844,7 @@ void svCallIsr()
                }
                break;
 
-       //kill PID
+       //kill PID; destroyThread
        case 50: ;
                uint8_t j;
                j = 0;
@@ -844,7 +861,7 @@ void svCallIsr()
                        }
 
 
-                       //freeing up the semaphore if the killed task was using a semaphore
+                       //freeing up the semaphore if the task to be killed is using a semaphore
                        semaphore* sem =  (tcb[j].semaphore);
                        if(sem != 0x00000000)    //if the task has a valid semaphore entry
                        {
@@ -908,6 +925,7 @@ void svCallIsr()
        //reboot
        case 51:
                NVIC_APINT_R = 0x05FA0004;
+               break;
 
        //run task_name
        case 52: ;
@@ -949,53 +967,51 @@ void svCallIsr()
 
                break;
 //ps
-       case 53:
-               putsUart0("Name\t\t\tPID\t\t\t%CPU\t\tPriority\n\r\n");
+       case 53: ;
                uint8_t ind1 = 0;
-               CPU_TIME [1 - pingpong] [KERNEL_TIME_INDEX] = 4000000 - CPU_TIME [1 - pingpong] [TOTAL_TIME_INDEX];
+               struct PSData* array = r0;
                uint32_t temporary = 0;
 
-               for(ind1 = 0; ind1<MAX_TASKS+2; ind1++)
+               CPU_TIME [1 - pingpong] [KERNEL_TIME_INDEX] = 4000000 - CPU_TIME [1 - pingpong] [TOTAL_TIME_INDEX];
+
+               temporary = (CPU_TIME[1-pingpong][KERNEL_TIME_INDEX])/400;
+
+               //store kernel time index
+               array[0].kernelTime = temporary;
+
+               if (r0 < tcb[taskCurrent].sp) {putsUart0("Shell stack size not enough!\n\r"); break;}   //struct array size around 288 bytes
+
+               for(ind1 = 0; ind1<MAX_TASKS; ind1++)
                {
                    if(ind1 < MAX_TASKS && tcb[ind1].state != STATE_INVALID)
                    {
-                       putsUart0(tcb[ind1].name);
+                       uint8_t nameInd = 0;
+                       while(tcb[ind1].name[nameInd] != 0)
+                       {
+                           array[ind1].name[nameInd] = tcb[ind1].name[nameInd];
+                           nameInd++;
+                       }
+                       array[ind1].name[nameInd] = '\0';
+                       array[ind1].nameLength = nameInd;
 
-                       if(tcb[ind1].nameLength >=8)
-                           putsUart0("\t\t");
-                       else
-                           putsUart0("\t\t\t");
+                       //store pid
+                       array[ind1].pid = tcb[ind1].pid;
 
-                       PrintIntToHex(tcb[ind1].pid);
-                       putsUart0("\t\t");
+                       //store cpu time %
                        temporary = (CPU_TIME[1-pingpong][ind1])/400;     //         temporary = raw-value/40E5 * 10000 = raw-value/400; 40E5 because we clear it every N ms(=100 ms)
+                       array[ind1].CPU = temporary;
 
-                       //char* outString;
+                       //store priority
+                       array[ind1].prio = tcb[ind1].currentPriority;
 
-                       getIntString(temporary/100);
-                       //putsUart0(outString);
-                       putcUart0('.');
-
-                       getIntString(temporary%100);
-                       //putsUart0(outString);
-                       putsUart0(" %\t\t");
-
-                       getIntString(tcb[ind1].currentPriority);
-                       putsUart0("\n\r");
+                       //set valid bit
+                       array[ind1].valid = 1;
                    }
 
+                   else
+                       array[ind1].valid = 0;
                }
 
-               temporary = (CPU_TIME[1-pingpong][KERNEL_TIME_INDEX])/400;
-               putsUart0("\nKernel Time\t\t\t\t\t");
-               getIntString(temporary/100);
-               putcUart0('.');
-               getIntString(temporary%100);
-               putsUart0(" %\t\n\r");
-
-               putsUart0("TOTAL\t\t\t\t\t\t");
-               putsUart0("100.00%");
-               putsUart0("\t\n\r");
                break;
 
                //pidOf
@@ -1049,9 +1065,10 @@ void svCallIsr()
                //setThreadPriority
        case 56: ;
                uint8_t ind4 = 0;
+               _fn testfn = r0;
                for (ind4 = 0; ind4 < MAX_TASKS; ind4++)
                {
-                   if (tcb[ind4].pid == r0)
+                   if (tcb[ind4].pid == testfn)
                    {
                        tcb[ind4].currentPriority = r1;
                        break;
@@ -1101,6 +1118,38 @@ void svCallIsr()
                    putsUart0("Preemption turned OFF\n\r");
                }
                break;
+
+               //restart thread
+       case 60: ;
+               uint32_t Process_ID = r0;
+               uint8_t ind5 = 0;
+//               notFound = true;
+               while(ind5 < MAX_TASKS)
+               {
+                   if (tcb[ind5].pid == Process_ID)
+                   {
+//                       notFound = false;
+                       if (tcb[ind5].state == STATE_UNRUN || tcb[ind5].state == STATE_KILLED)
+                       {
+                           tcb[ind5].state = STATE_READY;
+
+                           if(tcb[ind5].semaphore != 0x00000000)
+                           {
+                               semaphore* sem = (tcb[ind5].semaphore);
+                               tcb[ind5].state = STATE_BLOCKED;
+                               sem->processQueue[sem->queueSize] = ind5;
+                               sem->queueSize++;
+                           }
+                       }
+
+                       break;
+                   }
+                   ind5++;
+               }
+
+               break;
+
+
    }
 
 }
@@ -1718,7 +1767,7 @@ bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
  return false;
 }
 
-void ps(void)
+void ps(struct PSData* dataStruct)
 {
     __asm("     svc #53");
     //putsUart0("Name\tPID\t%CPU\t\n\r");
@@ -1786,7 +1835,46 @@ void shell()
 
     if(isCommand(&data,"ps",0))
     {
-       ps();
+       struct PSData psdata[MAX_TASKS];
+       ps(&psdata);
+       uint8_t ind1 = 0;
+
+       putsUart0("Name\t\t\tPID\t\t\t%CPU\t\tPriority\n\r\n");
+
+       for(ind1 = 0; ind1<MAX_TASKS; ind1++)
+       {
+           if(psdata[ind1].valid)
+           {
+               putsUart0(psdata[ind1].name);
+               if(psdata[ind1].nameLength >=8)
+                   putsUart0("\t\t");
+               else
+                   putsUart0("\t\t\t");
+
+               PrintIntToHex(psdata[ind1].pid);
+               putsUart0("\t\t");
+
+               getIntString((psdata[ind1].CPU) / 100);
+               putcUart0('.');
+
+               getIntString((psdata[ind1].CPU) % 100);
+               putsUart0(" %\t\t");
+
+               getIntString(psdata[ind1].prio);
+               putsUart0("\n\r");
+           }
+       }
+
+       putsUart0("\nKernel Time\t\t\t\t\t");
+       getIntString(psdata[0].kernelTime / 100);
+       putcUart0('.');
+       getIntString(psdata[0].kernelTime % 100);
+       putsUart0(" %\t\n\r");
+
+       putsUart0("TOTAL\t\t\t\t\t\t");
+       putsUart0("100.00%");
+       putsUart0("\t\n\r");
+
        valid = true;
     }
 

@@ -802,15 +802,17 @@ void svCallIsr()
                (semaphores[r0].count)++;
                if(semaphores[r0].queueSize > 0)
                {
-                   tcb[semaphores[r0].processQueue[0]].state = STATE_READY;
-                   (semaphores[r0].count--);
-
+                   if(tcb[semaphores[r0].processQueue[0]].state == STATE_BLOCKED)
+                   {
+                       tcb[semaphores[r0].processQueue[0]].state = STATE_READY;
+                       (semaphores[r0].count--);
 
                        //start editing priority inheritance here
-                   if(piON)
-                   {
-                       tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
+                       if(piON && tcb[taskCurrent].currentPriority != tcb[taskCurrent].priority)
+                       {
+                           tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
                        //end editing priority inheritance here
+                       }
                    }
 
                    uint8_t pQ = 0;
@@ -832,7 +834,7 @@ void svCallIsr()
                bool check = false;
                while (j < MAX_TASKS)
                {
-                   if (tcb[j].pid == r0 && tcb[j].state != STATE_KILLED)
+                   if (tcb[j].pid == r0 && (tcb[j].state != STATE_KILLED && tcb[j].state != STATE_UNRUN))
                    {
                        check = true;
                        if (stringCompare(tcb[j].name, "idle"))
@@ -840,9 +842,59 @@ void svCallIsr()
                            putsUart0("Cannot kill idle\n\r");
                            break;
                        }
+
+
+                       //freeing up the semaphore if the killed task was using a semaphore
+                       semaphore* sem =  (tcb[j].semaphore);
+                       if(sem != 0x00000000)    //if the task has a valid semaphore entry
+                       {
+                           if(tcb[j].state == STATE_READY || tcb[j].state == STATE_DELAYED)     //if the task is currently running or holding a semaphore
+                           {                                                                    //free up that semaphore and give it to the next task in the queue
+                               sem->count++;
+                               if(sem->queueSize > 0)
+                               {
+                                   if(tcb[sem->processQueue[0]].state == STATE_BLOCKED)
+                                   {
+                                       tcb[sem->processQueue[0]].state = STATE_READY;
+                                       (sem->count--);
+                                   }
+
+                                   uint8_t pQ = 0;
+                                   while(pQ < (sem->queueSize - 1))
+                                   {
+                                       sem->processQueue[pQ] = sem->processQueue[pQ + 1];
+                                       pQ++;
+                                   }
+
+                                   (sem->queueSize--);
+
+                               }
+                           }
+
+                           else     //if the task is currently being blocked by a semaphore
+                           {        //remove it from the semaphore waiting queue
+                               uint8_t taskQueueIndex = 0;
+                               while (sem->processQueue[taskQueueIndex] != j) { taskQueueIndex++;}   //find the index of the task in the semaphoreQueue
+                                                                                                    //we do this to remove it from the queue and move the other waiting task to its place in the queue
+
+                               uint8_t pQ = taskQueueIndex;
+                               while(pQ < (sem->queueSize - 1))
+                               {
+                                   sem->processQueue[pQ] = sem->processQueue[pQ + 1];
+                                   pQ++;
+                               }
+
+                               (sem->queueSize--);
+                           }
+
+                       }
+
+
+                       //changing the state of task to killed
                        tcb[j].state = STATE_KILLED;
                        PrintIntToHex(r0);
                        putsUart0(" Killed\n\r");
+
                        break;
                    }
                    j++;
@@ -868,7 +920,17 @@ void svCallIsr()
                    {
                        notFound = false;
                        if (tcb[ind].state == STATE_UNRUN || tcb[ind].state == STATE_KILLED)
+                       {
                            tcb[ind].state = STATE_READY;
+
+                           if(tcb[ind].semaphore != 0x00000000)
+                           {
+                               semaphore* sem = (tcb[ind].semaphore);
+                               tcb[ind].state = STATE_BLOCKED;
+                               sem->processQueue[sem->queueSize] = ind;
+                               sem->queueSize++;
+                           }
+                       }
 
                        else
                        {
@@ -886,7 +948,7 @@ void svCallIsr()
                }
 
                break;
-
+//ps
        case 53:
                putsUart0("Name\t\t\tPID\t\t\t%CPU\t\tPriority\n\r\n");
                uint8_t ind1 = 0;

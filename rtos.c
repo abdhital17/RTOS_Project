@@ -40,7 +40,7 @@
 //   Configured to 115,200 baud, 8N1
 
 
-//*******THIS IS A VISUAL REPRESENTATION OF HOW THE MPU IS CONFIGURED TO PROTECT THE 4GiB of MEMORY ADDRESSES IN THE CONTROLLER***
+//*******THIS IS A VISUAL REPRESENTATION OF HOW THE MPU IS CONFIGURED TO PROTECT THE 4GiB of MEMORY ADDRESSES IN THE CONTROLLER*****************************************
 //                  The priority of the MPU regions is
 //                  higher the region number,
 //                  higher will be the priority of that region
@@ -59,16 +59,17 @@
 //  * |  * priv mode- rwx   *                                                     |     *
 //  * |  *unpriv mode - rwx *                                                     |     *
 //  * |  ********************       _____________________________                 |     *
-//  * |                             |  31 KiB SRAM (total 32KiB) |                |     *
-//  * |                             |  divided into 32 subregions|                |     *
+//  * |                             |      (total 32KiB SRAM)    |                |     *
+//  * |                             |  divided into 4  subregions|                |     *
 //  * |                             |         region #2-5        |                |     *
 //  * |                             |  priv mode- rw access      |                |     *
-//  * |                             |  unpriv mode - no access   |                |     *
-//  * |                             |                            |                |     *
+//  * |                             |  unpriv mode - each thread |                |     *
+//  * |                             |       gets rw access to    |                |     *
+//  * |                             |       only its own stack   |                |     *
 //  * |                             |____________________________|                |     *
-//  * |                                   remaining 1 KiB SRAM                    |     *
-//  * |                                   priv mode- rw access,                   |     *
-//  * |                                   unpriv mode rw access                   |     *
+//  * |                                                                           |     *
+//  * |                                                                           |     *
+//  * |                                                                           |     *
 //  * |                                                                           |     *
 //  * |                                                                           |     *
 //  * |                        2GiB                                               |     *
@@ -638,7 +639,7 @@ int rtosScheduler()
         }
 
            if (!found)
-               checkPriority++;
+               checkPriority++;     //will never get >16 because Idle runs at priority 15 and is always ready
       }
       return task;
     }
@@ -753,6 +754,17 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].pid = fn;
 
 
+            //calculate the stackBytes in terms of 1 KiB (1024Bytes) regions
+            //for instance, if a thread/task only requires 100 Bytes of stack
+            //we still have to allocate it a 1KiB region since our MPU is based on this
+            uint32_t stackTemp = stackBytes/1024;
+            if (stackBytes%1024 > 0)
+                stackTemp++;
+
+            stackBytes = stackTemp * 1024;
+
+            //calculating the permissions field for the thread/task
+            //This is used to determine which sub-region/s to give it access to and which not to give access
             tcb[i].MPUpermissions = 0xFF;
             //uint8_t numSubRegions = stackBytes/1024;
             tcb[i].MPUpermissions >>= (8-stackBytes/1024);

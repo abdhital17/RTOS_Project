@@ -1,5 +1,5 @@
 ; MPU assembly functions
-; used in the MPU code
+; used in the RTOS code
 
 	.def unprivilegedMode
 	.def privilegedMode

@@ -142,9 +142,9 @@ uint8_t taskCount = 0;     // total number of valid tasks
 
 bool priorityScheduling = true; //true if priority scheduling mode
                                  //false if round-robin scheduling mode
-bool preemptON = false;         //true if preemption is on
+bool preemptON = true;         //true if preemption is on
                                 //false if off
-bool piON = false;              //true if priority inheritance on
+bool piON = true;              //true if priority inheritance on
                                //false if priority inheritance off
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -171,8 +171,11 @@ struct _tcb
 
 //CPU Time
 uint32_t CPU_TIME [2][MAX_TASKS + 2] = {0}; //data structure to hold the data required to calculate the CPU time percentage
+                                            //last two index hold the kernel time and total task time respectively
+
 uint8_t pingpong = 0;                       //variable used to switch between two
                                             //buffers in the pingpong buffer system
+
 uint8_t  systickCount = 0;                  //increments with each sysTick ISR call. On every 100th call, this variable is cleared
 
 #define TOTAL_TIME_INDEX     13
@@ -235,7 +238,7 @@ void init_MPU()
 //
     NVIC_MPU_CTRL_R    |= 0x7;       //MPU enable, default region enable, MPU enabled during hard faults
 
-    NVIC_SYS_HND_CTRL_R |= 0x70000;
+    NVIC_SYS_HND_CTRL_R |= 0x70000;     //enable the MPU, BUS and USAGE fault interrupts
 
 
 }
@@ -523,22 +526,31 @@ bool createSemaphore(uint8_t s, uint8_t count, char name[])
 void startRtos()
 {
     taskCurrent = rtosScheduler();
-    uint32_t* sp = tcb[taskCurrent].spInit;
-    setPSPaddress(sp);
+    uint32_t sp = tcb[taskCurrent].spInit;
+    setPSPaddress(sp-12);
+
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;
 
     tcb[taskCurrent].state = STATE_READY;
+
+//    NVIC_MPU_NUMBER_R   = 0x3;
+//    NVIC_MPU_ATTR_R   &= ~0xFF00;
+//    NVIC_MPU_ATTR_R   |=  0x0400;
+
     setASPbit();
 
+    _fn fn = (_fn) tcb[taskCurrent].pid;
 
-    _fn fn = tcb[taskCurrent].pid;
-    TIMER1_CTL_R |= TIMER_CTL_TAEN;
-    NVIC_MPU_NUMBER_R   = 0x3;
-    NVIC_MPU_ATTR_R   |= 0x0F00;
+    uint8_t i = 2;
+    for(i=2; i<6; i++)
+    {
+        NVIC_MPU_NUMBER_R   = i;
+        NVIC_MPU_ATTR_R &= ~(0xFF00);
+        NVIC_MPU_ATTR_R |= ((tcb[taskCurrent].MPUpermissions >> 8*(i-2)) & 0xFF) << 8;
+    }
+
 
     unprivilegedMode();
-
-//    uint32_t* trash = (uint32_t*) 0x200013fc;
-//    *trash = 0;
     fn();
 }
 
@@ -655,7 +667,9 @@ void pendSvIsr()
 
     taskCurrent=rtosScheduler();
 
+    //discard
     uint32_t jklfsadjdsaf;
+
     uint8_t i = 2;
     for(i=2; i<6; i++)
     {
@@ -762,19 +776,22 @@ void svCallIsr()
 
 
                    //start editing priority inheritance here
-                   uint8_t piIndex = 0;
-                   bool EXIST = false;
-                   while (piIndex < MAX_TASKS && !EXIST)
+                   if(piON)
                    {
-                       if ((tcb[piIndex].semaphore == &semaphores[r0]) && tcb[piIndex].currentPriority > tcb[taskCurrent].currentPriority)
+                       uint8_t piIndex = 0;
+                       bool EXIST = false;
+                       while (piIndex < MAX_TASKS && !EXIST)
                        {
+                           if ((tcb[piIndex].semaphore == &semaphores[r0]) && tcb[piIndex].currentPriority > tcb[taskCurrent].currentPriority)
+                           {
 
-                           tcb[piIndex].currentPriority = tcb[taskCurrent].currentPriority;
-                           EXIST = true;
+                               tcb[piIndex].currentPriority = tcb[taskCurrent].currentPriority;
+                               EXIST = true;
+                           }
+                           piIndex++;
                        }
-                       piIndex++;
-                   }
                    //end editing priority inheritance here
+                   }
 
                    NVIC_INT_CTRL_R   |= 0x10000000;  //setting the pendSV active bit at bit #28  of the NVIC_INT_CTRL register to enable the PendSV ISR call
                }
@@ -789,9 +806,12 @@ void svCallIsr()
                    (semaphores[r0].count--);
 
 
-                   //start editing priority inheritance here
-                   tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
-                   //end editing priority inheritance here
+                       //start editing priority inheritance here
+                   if(piON)
+                   {
+                       tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
+                       //end editing priority inheritance here
+                   }
 
                    uint8_t pQ = 0;
                    while(pQ < (semaphores[r0].queueSize - 1))
@@ -812,7 +832,7 @@ void svCallIsr()
                bool check = false;
                while (j < MAX_TASKS)
                {
-                   if (tcb[j].pid == r0)
+                   if (tcb[j].pid == r0 && tcb[j].state != STATE_KILLED)
                    {
                        check = true;
                        if (stringCompare(tcb[j].name, "idle"))
@@ -976,6 +996,49 @@ void svCallIsr()
                    }
                }
                break;
+
+               //priorityScheduling
+       case 57:
+               if (r0)
+               {
+                   priorityScheduling = true;
+                   putsUart0("Priority Scheduling turned ON\n\r");
+               }
+               else
+               {
+                   priorityScheduling = false;
+                   putsUart0("Priority Scheduling turned OFF\n\r");
+               }
+               break;
+
+               //pi
+       case 58:
+               if(r0)
+               {
+                   piON = true;
+                   putsUart0("Priority Inheritance turned on\n\r");
+               }
+
+               else
+               {
+                   piON = false;
+                   putsUart0("Priority Inheritance turned OFF\n\r");
+               }
+              break;
+
+               //preempt
+       case 59:
+               if(r0)
+               {
+                   preemptON = true;
+                   putsUart0("Preemption turned ON\n\r");
+               }
+               else
+               {
+                   preemptON = false;
+                   putsUart0("Preemption turned OFF\n\r");
+               }
+               break;
    }
 
 }
@@ -989,7 +1052,9 @@ void mpuFaultIsr()
        //_delay_cycles(5);
 
        putsUart0(Line_Break);
-       putsUart0("MPU Fault in process N \n\r");
+       putsUart0("MPU Fault in process ");
+       putsUart0(tcb[taskCurrent].name);
+       putsUart0(Line_Break);
 
        putsUart0("PSP: ");
        PrintIntToHex(getPSPaddress());
@@ -1017,9 +1082,9 @@ void mpuFaultIsr()
        putsUart0(Line_Break);
 
 
-       putsUart0("Offending thread: ");
-       putsUart0(tcb[taskCurrent].name);
-       putsUart0(Line_Break);
+//       putsUart0("Offending thread: ");
+//       putsUart0(tcb[taskCurrent].name);
+//       putsUart0(Line_Break);
 
        putsUart0("xPSR: ");
        PrintIntToHex(*(PSP_Address + 7));
@@ -1062,16 +1127,41 @@ void mpuFaultIsr()
 // REQUIRED: code this function
 void hardFaultIsr()
 {
+    putsUart0("Hard fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0(Line_Break);
+
+    putsUart0("PSP: ");
+    PrintIntToHex(getPSPaddress());
+    putsUart0(Line_Break);
+
+    putsUart0("MSP: ");
+    PrintIntToHex(getMSPaddress());
+    putsUart0(Line_Break);
+
+    putsUart0("Hard Fault Flag: ");
+    PrintIntToHex(NVIC_HFAULT_STAT_R);
+    putsUart0(Line_Break);
+
+
 }
 
 // REQUIRED: code this function
 void busFaultIsr()
 {
+    putsUart0("Bus fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0(Line_Break);
+
 }
 
 // REQUIRED: code this function
 void usageFaultIsr()
 {
+    putsUart0("Usage fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0(Line_Break);
+
 }
 
 //-----------------------------------------------------------------------------
@@ -1583,28 +1673,19 @@ void kill(uint32_t pid)
     __asm("  svc  #50");
 }
 
-void pi(bool on)
+void pi(uint8_t on)
 {
-    if (on)
-        putsUart0("PI on\n");
-    else
-        putsUart0("PI off\n");
+  __asm("       SVC #58");
 }
 
-void preempt(bool on)
+void preempt(uint8_t on)
 {
-    if (on)
-        putsUart0("Preempt on\n\r");
-    else
-        putsUart0("Preempt off\n\r");
+  __asm("       SVC #59");
 }
 
-void sched(bool prio_on)
+void sched(uint8_t prio_on)
 {
-    if (prio_on)
-        putsUart0("priority scheduling mode on\n\r");
-    else
-        putsUart0("round-robin scheduling mode on\n\r");
+    __asm("     SVC #57");
 }
 
 void pidof(char name[])
@@ -1664,7 +1745,12 @@ void shell()
         char* ONOFF = getFieldString(&data, 1);
         if (stringCompare("ON", ONOFF) || stringCompare("OFF", ONOFF))
         {
-            pi(stringCompare(ONOFF, "ON"));
+            if(stringCompare(ONOFF, "ON"))
+                pi(1);
+
+            else
+                pi(0);
+
             valid = true;
         }
     }
@@ -1674,7 +1760,12 @@ void shell()
         char* ONOFF = getFieldString(&data, 1);
         if (stringCompare("ON", ONOFF) || stringCompare("OFF", ONOFF))
         {
-            preempt(stringCompare(ONOFF, "ON"));
+            if(stringCompare(ONOFF, "ON"))
+                preempt(1);
+
+            else
+                preempt(0);
+
             valid = true;
         }
 
@@ -1682,10 +1773,14 @@ void shell()
 
     else if (isCommand(&data, "sched", 1))
     {
-        char* PR = getFieldString(&data, 1);
         if (stringCompare("PRIO", getFieldString(&data, 1)) || stringCompare("RR", getFieldString(&data, 1)))
         {
-            sched(stringCompare("PRIO", getFieldString(&data, 1)));
+            if(stringCompare("PRIO", getFieldString(&data, 1)))
+                sched(1);
+
+            else
+                sched(0);
+
             valid = true;
         }
     }
